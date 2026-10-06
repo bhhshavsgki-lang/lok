@@ -47,7 +47,7 @@ jobs:
         ZIP_NUM: ${{ github.event.inputs.zip_number }}
       run: |
         mkdir -p images remove
-        xvfb-run python main.py
+        xvfb-run python main2.py
 
     - name: Commit and Push
       run: |
