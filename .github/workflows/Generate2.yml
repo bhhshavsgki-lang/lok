@@ -26,6 +26,7 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: write
 
@@ -71,7 +72,7 @@ jobs:
         BG_MODELS: ${{ github.event.inputs.bg_models }}
       run: |
         mkdir -p images remove
-        xvfb-run python main4.py
+        xvfb-run python main.py
 
     - name: Commit and Push
       run: |
