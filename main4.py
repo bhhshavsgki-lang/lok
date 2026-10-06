@@ -10,47 +10,82 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from rembg import remove as rembg_remove, new_session
 
 # FIXED for duck.ai redesign (Oct 2026):
 #   - Tools -> "Create Image" (old "Image" tab is gone)
 #   - "Continue" consent gate auto-clicked
 #   - robust prompt parsing (survives "my_prompts = [...]" pastes, stray ')')
 # BACKGROUND REMOVAL upgraded: floodFill replaced by rembg AI models.
-#   BG_MODEL env picks the model:
-#     birefnet-general    best quality (2026 SOTA edges)  ~1GB download, slower
-#     isnet-general-use   fast, very good                 ~174MB
-#     u2net               legacy/faster, weakest edges
-#   All three are MIT/Apache licensed -> safe to sell on Redbubble.
+#   BG_MODELS env picks the model(s), comma separated, or "all":
+#     birefnet-general      best quality (2026 SOTA edges)  ~1GB, slower
+#     birefnet-general-lite lighter/faster BiRefNet         ~440MB
+#     isnet-general-use     fast, very good                 ~174MB
+#     u2net                 legacy baseline                 ~176MB
+#     silueta               tiny legacy baseline            ~40MB
+#   All are MIT/Apache licensed -> safe to sell on Redbubble.
+#   One model  -> zip layout same as before (no_bg_1.png)
+#   2+ models  -> each image is cut by EVERY model; inside remove_N.zip
+#                 each model gets its own folder (modelname/no_bg_1.png)
+#                 so you can compare them side by side.
 #   A hard-edge cleanup removes the soft white fringe stickers get.
 
-BG_MODEL = os.getenv("BG_MODEL", "birefnet-general")
-_session = None
+SAFE_ALL_MODELS = [
+    "birefnet-general",
+    "birefnet-general-lite",
+    "isnet-general-use",
+    "u2net",
+    "silueta",
+]
+_sessions = {}
 
 
-def get_session():
-    global _session
-    if _session is None:
+def parse_models(raw: str) -> list:
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return ["birefnet-general"]  # safe default
+    if raw == "all":
+        return list(SAFE_ALL_MODELS)
+    out = []
+    for m in raw.replace(";", ",").split(","):
+        m = m.strip()
+        if not m:
+            continue
+        if m == "all":
+            out.extend(x for x in SAFE_ALL_MODELS if x not in out)
+        elif m not in out:
+            out.append(m)
+    return out or ["birefnet-general"]
+
+
+MODELS = parse_models(os.getenv("BG_MODELS") or os.getenv("BG_MODEL"))
+
+
+def get_session(model: str):
+    """Load a rembg session once; returns None if the model fails."""
+    if model not in _sessions:
         try:
-            _session = new_session(BG_MODEL)
+            from rembg import new_session
+            print(f"loading model {model} …")
+            _sessions[model] = new_session(model)
         except Exception as e:
-            print(f"model {BG_MODEL} unavailable ({str(e)[:80]}), "
-                  "falling back to isnet-general-use")
-            _session = new_session("isnet-general-use")
-    return _session
+            print(f"⚠ model {model} unavailable ({str(e)[:80]}) — skipping it")
+            _sessions[model] = None
+    return _sessions[model]
 
 
-def remove_background(image_path: str, out_path: str) -> None:
+def remove_background(raw_bytes: bytes, out_path: str, session) -> bool:
     """AI cutout + hard sticker edge, output PNG with transparency."""
-    with open(image_path, "rb") as f:
-        cut = rembg_remove(f.read(), session=get_session())
+    from rembg import remove as _remove
+    cut = _remove(raw_bytes, session=session)
     arr = np.frombuffer(cut, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
     if img.ndim == 3 and img.shape[2] == 4:
         a = img[:, :, 3]
         a = np.where(a >= 200, 255, np.where(a <= 100, 0, a)).astype(np.uint8)
         img[:, :, 3] = a
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     cv2.imwrite(out_path, img)
+    return True
 
 
 def setup_driver():
@@ -117,15 +152,26 @@ def generate_images(prompts, batch_num):
                         By.XPATH, "//img[contains(@src, 'data:image')]")
                     if imgs:
                         b64data = imgs[-1].get_attribute("src").split(",", 1)[1]
+                        raw_bytes = base64.b64decode(b64data)
                         raw_path = os.path.join(temp_raw, f"raw_{i+1}.jpg")
                         with open(raw_path, "wb") as f:
-                            f.write(base64.b64decode(b64data))
+                            f.write(raw_bytes)
 
-                        no_bg_path = os.path.join(temp_no_bg, f"no_bg_{i+1}.png")
-                        remove_background(raw_path, no_bg_path)
+                        for model in MODELS:
+                            sess = get_session(model)
+                            if sess is None:
+                                continue
+                            out_path = os.path.join(
+                                temp_no_bg, model, f"no_bg_{i+1}.png")
+                            try:
+                                remove_background(raw_bytes, out_path, sess)
+                                remove_files.append((model, out_path))
+                                print(f"  cut with {model}")
+                            except Exception as e:
+                                print(f"⚠ {model} failed on image {i+1}: "
+                                      f"{str(e)[:100]}")
 
                         raw_files.append(raw_path)
-                        remove_files.append(no_bg_path)
                         print(f"Captured Image {i+1}")
                         captured = True
                         break
@@ -136,7 +182,7 @@ def generate_images(prompts, batch_num):
                 print(f"Error on prompt {i+1}: {e}")
 
         raw_files = [f for f in raw_files if os.path.exists(f)]
-        remove_files = [f for f in remove_files if os.path.exists(f)]
+        remove_files = [(m, f) for m, f in remove_files if os.path.exists(f)]
 
         if raw_files:
             z_path = os.path.join(images_repo_dir, f"gen_{batch_num}.zip")
@@ -148,9 +194,15 @@ def generate_images(prompts, batch_num):
 
         if remove_files:
             z_path = os.path.join(remove_repo_dir, f"remove_{batch_num}.zip")
+            multi = len(MODELS) > 1
             with zipfile.ZipFile(z_path, 'w') as z:
-                for f in remove_files: z.write(f, os.path.basename(f))
-            print(f"Created: {z_path}")
+                for model, f in remove_files:
+                    if multi:
+                        z.write(f, arcname=os.path.join(model, os.path.basename(f)))
+                    else:
+                        z.write(f, arcname=os.path.basename(f))
+            print(f"Created: {z_path} "
+                  f"({len(remove_files)} cutouts from {len(MODELS)} models)")
 
     finally:
         driver.quit()
@@ -180,7 +232,7 @@ if __name__ == "__main__":
         try:
             my_prompts = parse_prompts(raw_input)
             print(f"Parsed {len(my_prompts)} prompts. Batch number: {manual_zip_num}")
-            print(f"Background removal model: {BG_MODEL}")
+            print(f"Background-removal models ({len(MODELS)}): {', '.join(MODELS)}")
             generate_images(my_prompts, manual_zip_num)
         except Exception as e:
             print(f"Parsing error: {e}")
