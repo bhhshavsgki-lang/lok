@@ -1,4 +1,4 @@
-name: Generate 2
+name: Generate Raw and NoBG Zips
 
 on:
   workflow_dispatch:
@@ -12,6 +12,16 @@ on:
         required: true
         default: '1'
         type: string
+      bg_models:
+        description: 'Cutout model(s): one name, several comma-separated, or "all" (birefnet-general, birefnet-general-lite, isnet-general-use, u2net, silueta)'
+        required: false
+        default: 'birefnet-general'
+        type: string
+      clean_zips:
+        description: 'Delete ALL old zips in images/ and remove/ before generating'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   run-bot:
@@ -31,7 +41,7 @@ jobs:
         path: |
           ~/.rembg
           ~/.u2net
-        key: rembg-models-${{ env.BG_MODEL }}
+        key: rembg-models-v2
         restore-keys: rembg-models-
 
     - name: Set up Python
@@ -49,24 +59,28 @@ jobs:
         python -m pip install --upgrade pip
         pip install seleniumbase selenium-stealth opencv-python-headless numpy rembg onnxruntime pillow
 
+    - name: Clean old zips (optional)
+      if: ${{ github.event.inputs.clean_zips == 'true' }}
+      run: |
+        rm -fv images/*.zip remove/*.zip
+
     - name: Execute Script
       env:
         USER_PROMPTS: ${{ github.event.inputs.prompts_list }}
         ZIP_NUM: ${{ github.event.inputs.zip_number }}
-        BG_MODEL: birefnet-general
+        BG_MODELS: ${{ github.event.inputs.bg_models }}
       run: |
         mkdir -p images remove
-        xvfb-run python main4.py
+        xvfb-run python main.py
 
     - name: Commit and Push
       run: |
         git config --global user.name "GitHub Action Bot"
         git config --global user.email "actions@github.com"
 
-        git add images/*.zip || echo "No images zips"
-        git add remove/*.zip || echo "No remove zips"
+        git add -A images remove || echo "Nothing to stage"
 
-        git commit -m "Manual batch: ${{ github.event.inputs.zip_number }}" || exit 0
+        git commit -m "Batch ${{ github.event.inputs.zip_number }} (models: ${{ github.event.inputs.bg_models }})" || exit 0
 
         for i in {1..5}; do
           echo "Attempt $i to push..."
