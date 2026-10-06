@@ -109,18 +109,36 @@ def generate_images(prompts, batch_num):
         driver.quit()
 
 
+def parse_prompts(raw: str) -> list:
+    """Robust parse: accepts 'my_prompts = [...]', bare '[...]',
+    stray trailing ')' or missing brackets messiness from pasting."""
+    raw = raw.strip()
+    if "=" in raw:
+        head = raw.split("=", 1)[0].strip()
+        if head.replace("_", "").isalpha():  # leading assignment like my_prompts =
+            raw = raw.split("=", 1)[1].strip()
+    start, end = raw.find("["), raw.rfind("]")
+    if start != -1 and end > start:
+        raw = raw[start:end + 1]  # keep only the bracketed list
+    data = ast.literal_eval(raw)
+    if not isinstance(data, list):
+        raise ValueError("not a list")
+    return [str(p).strip() for p in data if str(p).strip()]
+
+
 if __name__ == "__main__":
     raw_input = os.getenv("USER_PROMPTS", "").strip()
     manual_zip_num = os.getenv("ZIP_NUM", "1")
 
     if raw_input:
         try:
-            list_data = (raw_input.split("=", 1)[1].strip()
-                         if "=" in raw_input else raw_input)
-            my_prompts = ast.literal_eval(list_data)
-            if isinstance(my_prompts, list):
+            my_prompts = parse_prompts(raw_input)
+            if my_prompts:
                 generate_images(my_prompts, manual_zip_num)
+            else:
+                print("No prompts found in USER_PROMPTS")
         except Exception as e:
             print(f"Parsing error: {e}")
+            print(f"Raw input was: {raw_input[:200]}")
     else:
         generate_images(["a small blue robot watering a plant"], "1")
