@@ -92,6 +92,63 @@ def setup_driver():
     return Driver(uc=True, headless=True, no_sandbox=True)
 
 
+def write_zips(batch_num, raw_files, remove_files, images_repo_dir, remove_repo_dir):
+    """(Re)build both zips from everything captured so far — safe to call
+    repeatedly; overwrites the same zip with the latest content."""
+    raw_files = [f for f in raw_files if os.path.exists(f)]
+    remove_files = [(m, f) for m, f in remove_files if os.path.exists(f)]
+    if raw_files:
+        z_path = os.path.join(images_repo_dir, f"gen_{batch_num}.zip")
+        with zipfile.ZipFile(z_path, 'w') as z:
+            for f in raw_files: z.write(f, os.path.basename(f))
+        print(f"Created: {z_path}")
+    if remove_files:
+        z_path = os.path.join(remove_repo_dir, f"remove_{batch_num}.zip")
+        multi = len(MODELS) > 1
+        with zipfile.ZipFile(z_path, 'w') as z:
+            for model, f in remove_files:
+                if multi:
+                    z.write(f, arcname=os.path.join(model, os.path.basename(f)))
+                else:
+                    z.write(f, arcname=os.path.basename(f))
+        print(f"Created: {z_path} "
+              f"({len(remove_files)} cutouts from {len(MODELS)} models)")
+
+
+def git_push_batch(batch_num, models_tag):
+    """Commit+push the current zips (best effort). Only runs on GitHub —
+    each finished image lands in the repo immediately, so canceling or
+    timing out later can never lose the images already done."""
+    if os.getenv("GITHUB_ACTIONS") != "true":
+        return
+    import subprocess
+    env = dict(os.environ)
+    try:
+        subprocess.run(["git", "config", "user.name", "GitHub Action Bot"],
+                       check=False, env=env)
+        subprocess.run(["git", "config", "user.email", "actions@github.com"],
+                       check=False, env=env)
+        subprocess.run(["git", "add", "-A", "images", "remove"],
+                       check=False, env=env)
+        c = subprocess.run(["git", "commit", "-m",
+                            f"Batch {batch_num} ({models_tag}) — partial save"],
+                           capture_output=True, env=env)
+        if c.returncode != 0:
+            return  # nothing new to commit
+        for _ in range(3):
+            subprocess.run(["git", "pull", "origin", "main", "--rebase"],
+                           capture_output=True, env=env)
+            p = subprocess.run(["git", "push", "origin", "main"],
+                               capture_output=True, env=env)
+            if p.returncode == 0:
+                print("saved to repo (incremental)")
+                return
+            time.sleep(5)
+        print("⚠ incremental push failed — final commit step will retry")
+    except Exception as e:
+        print("incremental save skipped:", str(e)[:80])
+
+
 def generate_images(prompts, batch_num):
     driver = setup_driver()
     base_url = "https://duck.ai/chat?duckai=1"
@@ -107,6 +164,7 @@ def generate_images(prompts, batch_num):
 
     raw_files = []
     remove_files = []
+    models_tag = "+".join(m.split("-")[0] for m in MODELS)
 
     try:
         for i, prompt in enumerate(prompts):
@@ -174,6 +232,10 @@ def generate_images(prompts, batch_num):
                         raw_files.append(raw_path)
                         print(f"Captured Image {i+1}")
                         captured = True
+                        # save immediately: cancel/timeout can't lose it
+                        write_zips(batch_num, raw_files, remove_files,
+                                   images_repo_dir, remove_repo_dir)
+                        git_push_batch(batch_num, models_tag)
                         break
                     time.sleep(5)
                 if not captured:
@@ -181,31 +243,18 @@ def generate_images(prompts, batch_num):
             except Exception as e:
                 print(f"Error on prompt {i+1}: {e}")
 
-        raw_files = [f for f in raw_files if os.path.exists(f)]
-        remove_files = [(m, f) for m, f in remove_files if os.path.exists(f)]
-
-        if raw_files:
-            z_path = os.path.join(images_repo_dir, f"gen_{batch_num}.zip")
-            with zipfile.ZipFile(z_path, 'w') as z:
-                for f in raw_files: z.write(f, os.path.basename(f))
-            print(f"Created: {z_path}")
-        else:
-            print("No raw images captured for this batch.")
-
-        if remove_files:
-            z_path = os.path.join(remove_repo_dir, f"remove_{batch_num}.zip")
-            multi = len(MODELS) > 1
-            with zipfile.ZipFile(z_path, 'w') as z:
-                for model, f in remove_files:
-                    if multi:
-                        z.write(f, arcname=os.path.join(model, os.path.basename(f)))
-                    else:
-                        z.write(f, arcname=os.path.basename(f))
-            print(f"Created: {z_path} "
-                  f"({len(remove_files)} cutouts from {len(MODELS)} models)")
-
     finally:
         driver.quit()
+        # safety net: even on cancel/error, zip whatever was captured
+        try:
+            write_zips(batch_num, raw_files, remove_files,
+                       images_repo_dir, remove_repo_dir)
+            git_push_batch(batch_num, models_tag)
+        except Exception as e:
+            print("final save failed:", str(e)[:120])
+
+    if not raw_files:
+        print("No raw images captured for this batch.")
 
 
 def parse_prompts(raw: str) -> list:
