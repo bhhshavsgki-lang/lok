@@ -71,7 +71,7 @@ jobs:
         BG_MODELS: ${{ github.event.inputs.bg_models }}
       run: |
         mkdir -p images remove
-        xvfb-run python main.py
+        xvfb-run python main4.py
 
     - name: Commit and Push
       run: |
