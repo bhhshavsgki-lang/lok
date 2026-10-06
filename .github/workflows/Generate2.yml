@@ -56,7 +56,7 @@ jobs:
         BG_MODEL: birefnet-general
       run: |
         mkdir -p images remove
-        xvfb-run python main.py
+        xvfb-run python main4.py
 
     - name: Commit and Push
       run: |
