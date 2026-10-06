@@ -1,4 +1,4 @@
-name: Generate Raw and NoBG Zips
+name: Generate2
 
 on:
   workflow_dispatch:
